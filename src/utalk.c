@@ -21,99 +21,57 @@
 
 #define BUFFER_SIZE 1024
 
-/* select blocking timeout in seconds */
+/* select() blocking timeout in seconds */
 #define TIMEOUT 10
 
-int parse_args(int argc, char *argv[], int *port, char **username,
-               char **host);
+struct settings {
+    char *username, *remote_username, *host;
+    int port;
+};
 
-int main(int argc, char *argv[])
-{
-    int port = -1;
-    char *host = NULL, *username = NULL;
+struct sockaddr_in* init_server(int sock, struct settings *prefs);
 
-    if (parse_args(argc, argv, &port, &username, &host) == -1) {
+struct sockaddr_in* init_client(int sock, struct settings *prefs);
+
+int parse_args(int argc, char *argv[], struct settings *options);
+
+int main(int argc, char *argv[]) {
+    struct settings prefs = { NULL, NULL, NULL, -1};
+
+    if (parse_args(argc, argv, &prefs) == -1) {
         return 1;
     }
 
-    printf("Port number: %d\nUsername: %s\nHost: %s\n", port, username, host);
+    printf("Port number: %d\nUsername: %s\nHost: %s\n", prefs.port, prefs.username, prefs.host);
 
-    if (port == -1 || username == NULL) {
+    if (prefs.port == -1 || prefs.username == NULL) {
         perror("Port and username are required arguments!\n");
         return 1;
     }
 
-    struct sockaddr_in server_address, client_address;
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    unsigned int addr_len = sizeof(struct sockaddr);
-    char input_buffer[BUFFER_SIZE], read_buffer[BUFFER_SIZE];
-
-    memset(input_buffer, 0, BUFFER_SIZE);
-    memset(read_buffer, 0, BUFFER_SIZE);
 
     if (sock == -1) {
         perror("Could not create a socket.\n");
         return 1;
     }
-
-    /* AF_INET is for IPv4 */
-    server_address.sin_family = AF_INET;
-    client_address.sin_family = AF_INET;
-    /* htons makes sure port number is represented in MSB first */
-    server_address.sin_port = htons(port);
-    memset(&(server_address.sin_zero), 0, sizeof(server_address.sin_zero));
-
-    if (host == NULL) {
-        server_address.sin_addr.s_addr = INADDR_ANY;
-
-        if (bind(sock, (struct sockaddr*)&server_address,
-                sizeof(struct sockaddr)) == -1)
-        {
-            perror("Could not bind a socket.\n");
-            return 1;
-        }
-        printf("UDP server started. Awaiting client connection on port %d.\n",
-                port);
-
-        int bytes_received = recvfrom(sock, read_buffer, BUFFER_SIZE, 0,
-                (struct sockaddr*)&client_address, &addr_len);
-
-        if (bytes_received <= 0) {
-            perror("Error during connection, exiting.");
-            return 1;
-        }
-        //inet_ntop(AF_INET, &client_address.sin_addr, from_ip, sizeof(from_ip));
-        printf("Connection estabilished, client address %s:%d",
-                inet_ntoa(client_address.sin_addr),
-                ntohs(client_address.sin_port));
-        return 0;
-    } else {
-        /* resolve the address of the host */
-        struct hostent *h = (struct hostent*)gethostbyname(host);
-
-        if (h == NULL) {
-            perror("Could not resolve host name");
-            return 1;
-        }
-        server_address.sin_addr = *((struct in_addr*)h->h_addr_list[0]);
-
-        int status = sendto(sock, username, strlen(username), 0,
-                (struct sockaddr*)&server_address, sizeof(struct sockaddr));
-        if (status == -1) {
-            perror("Error during connecting to the server.\n");
-            return 1;
-        }
-        printf("Connection to the host estabilished.\n");
-        return 0;
-    }
-
-    fflush(stdout);
+        
+    struct sockaddr_in *remote_addr = (prefs.host == NULL)
+        ? init_server(sock, &prefs)
+        : init_client(sock, &prefs);
 
     fd_set write_fds, read_fds;
-    int max_fd = (sock > STDIN) ? sock : STDIN,
+    int max_fd = sock + 1,
         select_fd = 0,
-        bytes_received;
+        bytes_received,
+        status;
+    socklen_t addr_len = sizeof(struct sockaddr);
+
     //struct timeval timeout = {TIMEOUT, 0};
+    char input_buffer[BUFFER_SIZE], read_buffer[BUFFER_SIZE];
+
+    memset(input_buffer, 0, BUFFER_SIZE);
+    memset(read_buffer, 0, BUFFER_SIZE);
 
     while (1) {
         /* Clear the file descriptor sets */
@@ -125,7 +83,7 @@ int main(int argc, char *argv[])
         FD_SET(sock, &read_fds);
         FD_SET(STDIN, &read_fds);
 
-        select_fd = select(max_fd + 1, &read_fds, &write_fds, NULL, NULL);
+        select_fd = select(max_fd, &read_fds, &write_fds, NULL, NULL);
 
         if (select_fd == -1) {
             perror("Error during select.\n");
@@ -133,52 +91,181 @@ int main(int argc, char *argv[])
             if (FD_ISSET(STDIN, &read_fds)) {
                 /* read user input and send the message */
                 /* "%*[^\n]%*c" discards all the input after 80 characters */
-                scanf("%80s%*[^\n]%*c", input_buffer);
+                fgets(input_buffer, 100, stdin);
+                if (strcmp(input_buffer, ":q\n") == 0 || strcmp(input_buffer, ":Q\n") == 0) {
+                    status = close(sock);
+                    if (status == -1) {
+                        perror("Could not close the socket.\n");
+                    } else {
+                        printf("Goodbye :-)\n");
+                        return 0;
+                    }
+                }
             }
             if (FD_ISSET(sock, &read_fds)) {
                 /* read incoming data from socket */
-                bytes_received = recvfrom(sock, read_buffer, BUFFER_SIZE,
-                                          0, NULL, NULL);
+                bytes_received = recvfrom(sock, read_buffer, BUFFER_SIZE, 0, NULL, NULL);
                 if (bytes_received == 0) {
                     printf("Other user has disconnected, exiting.\n");
                     break;
                 } else if (bytes_received == -1) {
                     perror("Error, lost connection");
                     break;
-                } else {
-                    read_buffer[bytes_received] = '\0';
-                    printf("Message received: %s\n", read_buffer);
                 }
-
+                
+                read_buffer[bytes_received] = '\0';
+                printf("%s: %s", prefs.remote_username, read_buffer);
+                memset(read_buffer, 0, BUFFER_SIZE);
             }
-            if (FD_ISSET(sock, &write_fds) && strlen(input_buffer) != 0) {
+            if (FD_ISSET(sock, &write_fds)) {
                 /* send any available messages */
-                sendto(sock, input_buffer, strlen(input_buffer), 0,
-                    (struct sockaddr *)&server_address, sizeof(struct sockaddr));
+                if (strlen(input_buffer) > 0) {
+                    status = sendto(sock, input_buffer, strlen(input_buffer), 0,
+                        (struct sockaddr *)remote_addr, addr_len);
+                    if (status == -1) {
+                        printf("The message could not be sent :-(\n%s", strerror(errno));
+                    }
+                    memset(input_buffer, 0, BUFFER_SIZE);
+                }
             }
         }
+
+        sleep(1);
     }
 
-    if (host != NULL) {
-        free(host);
+
+
+    if (prefs.host != NULL) {
+        free(prefs.host);
     }
-    if (username != NULL) {
-        free(username);
+    if (prefs.username != NULL) {
+        free(prefs.username);
+    }
+    if (prefs.remote_username != NULL) {
+        free(prefs.remote_username);
+    }
+    if (remote_addr != NULL) {
+        free(remote_addr);
     }
 
     return 0;
 }
 
-int parse_args(int argc, char *argv[], int *port, char **username,
-               char **host)
+struct sockaddr_in* init_server(int sock, struct settings *prefs) {
+    struct sockaddr_in *server_addr = malloc(sizeof(struct sockaddr)),
+                       *client_addr = malloc(sizeof(struct sockaddr));
+    char buffer[BUFFER_SIZE];
+    int bytes_received;
+    socklen_t addr_len = sizeof(struct sockaddr);
+
+    memset(buffer, 0, BUFFER_SIZE);
+
+    /* AF_INET is for IPv4 */
+    server_addr->sin_family = AF_INET;
+    /* htons makes sure port number is represented in MSB first */
+    server_addr->sin_port = htons(prefs->port);
+    server_addr->sin_addr.s_addr = INADDR_ANY;
+
+    memset(&(server_addr->sin_zero), 0, sizeof(server_addr->sin_zero));
+
+    if (bind(sock, (struct sockaddr*)server_addr, addr_len) == -1) {
+        perror("Could not bind a socket.\n");
+        return NULL;
+    }
+
+    printf("UDP server started. Awaiting client connection on port %d.\n", prefs->port);
+
+    while (1) {
+        /* Initial message should be the client username */
+        bytes_received = recvfrom(sock, buffer, BUFFER_SIZE, 0,
+                (struct sockadrr*)client_addr, &addr_len);
+
+        if (bytes_received <= 0) {
+            perror("Could not receive handshake data.\n");
+            return NULL;
+        } else if (bytes_received > 10) {
+            perror("Username sent by the client is too long.\n");
+        } else {
+            sendto(sock, prefs->username, strlen(prefs->username), 0,
+                (struct sockaddr*)client_addr, addr_len);
+            break;
+        }
+    }
+
+
+    /* Save the username client has sent */
+    prefs->remote_username = malloc((USERNAME_LEN + 1) * sizeof(char));
+    strcpy(prefs->remote_username, buffer);
+
+    printf("Connection estabilished, client address %s:%d, client username: %s\n",
+            inet_ntoa(client_addr->sin_addr),
+            ntohs(client_addr->sin_port),
+            prefs->remote_username);
+
+    return client_addr;
+}
+
+struct sockaddr_in* init_client(int sock, struct settings *prefs) {
+    struct sockaddr_in *server_addr = malloc(sizeof(struct sockaddr));
+    /* resolve the address of the host */
+    struct hostent *h = (struct hostent*)gethostbyname(prefs->host);
+    char buffer[BUFFER_SIZE];
+    int bytes_received;
+    unsigned int addr_len = sizeof(struct sockaddr);
+
+    memset(buffer, 0, BUFFER_SIZE);
+
+    if (h == NULL) {
+        perror("Could not resolve host name");
+        return NULL;
+    }
+    
+    /* AF_INET is for IPv4 */
+    server_addr->sin_family = AF_INET;
+    /* htons makes sure port number is represented in MSB first */
+    server_addr->sin_port = htons(prefs->port);
+    server_addr->sin_addr = *((struct in_addr*)h->h_addr_list[0]);
+
+    memset(&(server_addr->sin_zero), 0, sizeof(server_addr->sin_zero));
+
+    /* Send the username to the server */
+    bytes_received = sendto(sock, prefs->username, strlen(prefs->username), 0,
+            (struct sockaddr*)server_addr, addr_len);
+    if (bytes_received == -1) {
+        perror("Could not send username to the server.\n");
+        return NULL;
+    }
+
+    /* Receive server username */
+    bytes_received = recvfrom(sock, buffer, BUFFER_SIZE, 0,
+                (struct sockaddr*)server_addr, &addr_len);
+    
+    if (bytes_received == -1) {
+        perror("Could not receive the server username.\n");
+        return NULL;
+    } else if (bytes_received > 10) {
+        perror("Received username is too long.\n");
+        return NULL;
+    }
+
+    buffer[bytes_received] = '\0';
+    prefs->remote_username = malloc((USERNAME_LEN + 1) * sizeof(char));
+    strcpy(prefs->remote_username, buffer);
+
+    printf("Connected to user %s at %s.\n", prefs->remote_username, prefs->host);
+    
+    return server_addr;
+}
+
+int parse_args(int argc, char *argv[], struct settings *prefs)
 {
     int option;
 
     while ((option = getopt(argc, argv, "p:h:u:")) != -1) {
         switch (option) {
             case 'p': {
-                *port = atoi(optarg);
-                if (*port <= 0 || *port > 65535) {
+                prefs->port = atoi(optarg);
+                if (prefs->port <= 0 || prefs->port > 65535) {
                     perror("Invalid port number!\n");
                     return -1;
                 }
@@ -189,8 +276,8 @@ int parse_args(int argc, char *argv[], int *port, char **username,
                     perror("Chosen username is too long!\n");
                     return -1;
                 }
-                *username = (char*)malloc((USERNAME_LEN + 1) * sizeof(char));
-                strcpy(*username, optarg);
+                prefs->username = malloc((USERNAME_LEN + 1) *sizeof(char));
+                strcpy(prefs->username, optarg);
                 break;
             }
             case 'h': {
@@ -198,8 +285,8 @@ int parse_args(int argc, char *argv[], int *port, char **username,
                     perror("Chosen host adress is too long!");
                     return -1;
                 }
-                *host = (char*)malloc((HOST_LEN + 1) * sizeof(char));
-                strcpy(*host, optarg);
+                prefs->host = malloc((HOST_LEN + 1) * sizeof(char));
+                strcpy(prefs->host, optarg);
                 break;
             }
             default: {
