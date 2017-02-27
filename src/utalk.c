@@ -1,16 +1,21 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 199309L
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
 #include <errno.h>
-#include <sys/socket.h>
-#include <sys/select.h>
-#include <sys/time.h>
-#include <sys/types.h>
 #include <unistd.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <ncurses.h>
+#include <time.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <sys/time.h>
+#include <sys/types.h>
 
 /* File descriptor */
 #define STDIN 0
@@ -21,6 +26,9 @@
 
 #define BUFFER_SIZE 1024
 
+/* Sleep time after each chat cycle in nanoseconds */
+#define SLEEP_TIME 10000000
+
 /* select() blocking timeout in seconds */
 #define TIMEOUT 10
 
@@ -28,6 +36,8 @@ struct settings {
     char *username, *remote_username, *host;
     int port;
 };
+
+void draw_borders(WINDOW *messages, WINDOW *input);
 
 struct sockaddr_in* init_server(int sock, struct settings *prefs);
 
@@ -37,6 +47,7 @@ int parse_args(int argc, char *argv[], struct settings *options);
 
 int main(int argc, char *argv[]) {
     struct settings prefs = { NULL, NULL, NULL, -1};
+    struct timespec sleep_time = {0, SLEEP_TIME};
 
     if (parse_args(argc, argv, &prefs) == -1) {
         return 1;
@@ -68,10 +79,30 @@ int main(int argc, char *argv[]) {
     socklen_t addr_len = sizeof(struct sockaddr);
 
     //struct timeval timeout = {TIMEOUT, 0};
-    char input_buffer[BUFFER_SIZE], read_buffer[BUFFER_SIZE];
+    char input_buffer[BUFFER_SIZE],
+         read_buffer[BUFFER_SIZE];
 
     memset(input_buffer, 0, BUFFER_SIZE);
     memset(read_buffer, 0, BUFFER_SIZE);
+
+    int parent_x, parent_y;
+    initscr();
+    echo();
+    curs_set(1); // get our maximum window dimensions
+    getmaxyx(stdscr, parent_y, parent_x); // set up initial windows
+
+    WINDOW *messages = newwin(parent_y - 4, parent_x, 0, 0);
+    WINDOW *input = newwin(4, parent_x, parent_y - 4, 0); // draw to our windows
+    
+    int input_x = 1, input_y = 1, messages_x = 1, messages_y = 1;
+    scrollok(messages, TRUE);
+    draw_borders(messages, input);
+
+    wmove(messages, 1, 1);
+    wmove(input, 1, 1);
+
+    wrefresh(messages);
+    wrefresh(input);
 
     while (1) {
         /* Clear the file descriptor sets */
@@ -91,14 +122,23 @@ int main(int argc, char *argv[]) {
             if (FD_ISSET(STDIN, &read_fds)) {
                 /* read user input and send the message */
                 /* "%*[^\n]%*c" discards all the input after 80 characters */
-                fgets(input_buffer, 100, stdin);
-                if (strcmp(input_buffer, ":q\n") == 0 || strcmp(input_buffer, ":Q\n") == 0) {
+                //fgets(input_buffer, 100, stdin);
+                wgetstr(input, input_buffer);
+                werase(input);
+                wmove(input, input_y, input_x);
+
+                wprintw(messages, "[%s] %s\n", prefs.username, input_buffer);
+                getyx(messages, messages_y, messages_x);
+                wmove(messages, messages_y, 1);
+                draw_borders(messages, input);
+
+                if (strcmp(input_buffer, ":q") == 0 || strcmp(input_buffer, ":Q") == 0) {
                     status = close(sock);
                     if (status == -1) {
                         perror("Could not close the socket.\n");
                     } else {
                         printf("Goodbye :-)\n");
-                        return 0;
+                        break;
                     }
                 }
             }
@@ -114,7 +154,12 @@ int main(int argc, char *argv[]) {
                 }
                 
                 read_buffer[bytes_received] = '\0';
-                printf("%s: %s", prefs.remote_username, read_buffer);
+                //printf("%s: %s", prefs.remote_username, read_buffer);
+                wprintw(messages, "[%s] %s\n", prefs.remote_username, read_buffer);
+                getyx(messages, messages_y, messages_x);
+                wmove(messages, messages_y, 1);
+                draw_borders(messages, input);
+
                 memset(read_buffer, 0, BUFFER_SIZE);
             }
             if (FD_ISSET(sock, &write_fds)) {
@@ -130,10 +175,10 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        sleep(1);
+        wrefresh(messages);
+        wrefresh(input);
+        nanosleep(&sleep_time, NULL);
     }
-
-
 
     if (prefs.host != NULL) {
         free(prefs.host);
@@ -148,12 +193,33 @@ int main(int argc, char *argv[]) {
         free(remote_addr);
     }
 
+    delwin(messages);
+    delwin(input);
+    endwin();
+
     return 0;
 }
 
+void draw_borders(WINDOW *messages, WINDOW *input) {
+    int x, y;
+
+    wborder(messages, '|', '|', '-', '-', '+', '+', '+', '+');
+    wborder(input, '|', '|', '-', '-', '+', '+', '+', '+');
+
+    getyx(messages, y, x);
+    wmove(messages, 0, 1);
+    wprintw(messages, "Messsages");
+    wmove(messages, y, x);
+
+    getyx(input, y, x);
+    wmove(input, 0, 1);
+    wprintw(input, "Input"); // refresh each window
+    wmove(input, y, x);
+}
+
 struct sockaddr_in* init_server(int sock, struct settings *prefs) {
-    struct sockaddr_in *server_addr = malloc(sizeof(struct sockaddr)),
-                       *client_addr = malloc(sizeof(struct sockaddr));
+    struct sockaddr_in *server_addr = malloc(sizeof(struct sockaddr_in)),
+                       *client_addr = malloc(sizeof(struct sockaddr_in));
     char buffer[BUFFER_SIZE];
     int bytes_received;
     socklen_t addr_len = sizeof(struct sockaddr);
@@ -257,8 +323,7 @@ struct sockaddr_in* init_client(int sock, struct settings *prefs) {
     return server_addr;
 }
 
-int parse_args(int argc, char *argv[], struct settings *prefs)
-{
+int parse_args(int argc, char *argv[], struct settings *prefs){ 
     int option;
 
     while ((option = getopt(argc, argv, "p:h:u:")) != -1) {

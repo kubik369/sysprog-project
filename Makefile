@@ -1,7 +1,6 @@
 default: all
 all:
-	mkdir -p build
-	gcc -Wall -std=c11 -o build/utalk src/utalk.c
+	gcc -Wall -std=c11 -O2 -o utalk src/utalk.c -lncurses
 
 clean:
-	rm -rf build
+	rm utalk
