@@ -23,6 +23,9 @@
 /* Use real lengths, \0 is accounted for in the code. */
 #define USERNAME_LEN 10
 #define HOST_LEN 15
+#define MAX_MESSAGE_LEN 70
+
+#define INPUT_BOX_HEIGHT 4
 
 #define BUFFER_SIZE 1024
 
@@ -37,7 +40,8 @@ struct settings {
     int port;
 };
 
-void draw_borders(WINDOW *messages, WINDOW *input);
+void draw_borders(WINDOW *win_messages, WINDOW *win_input,
+                  struct settings *prefs);
 
 struct sockaddr_in* init_server(int sock, struct settings *prefs);
 
@@ -46,14 +50,16 @@ struct sockaddr_in* init_client(int sock, struct settings *prefs);
 int parse_args(int argc, char *argv[], struct settings *options);
 
 int main(int argc, char *argv[]) {
-    struct settings prefs = { NULL, NULL, NULL, -1};
+    struct settings prefs = {NULL, NULL, NULL, -1};
     struct timespec sleep_time = {0, SLEEP_TIME};
+    time_t rawtime;
 
     if (parse_args(argc, argv, &prefs) == -1) {
         return 1;
     }
 
-    printf("Port number: %d\nUsername: %s\nHost: %s\n", prefs.port, prefs.username, prefs.host);
+    printf("Port number: %d\nUsername: %s\nHost: %s\n",
+            prefs.port, prefs.username, prefs.host);
 
     if (prefs.port == -1 || prefs.username == NULL) {
         perror("Port and username are required arguments!\n");
@@ -66,7 +72,8 @@ int main(int argc, char *argv[]) {
         perror("Could not create a socket.\n");
         return 1;
     }
-        
+
+    /* Initialize connection */
     struct sockaddr_in *remote_addr = (prefs.host == NULL)
         ? init_server(sock, &prefs)
         : init_client(sock, &prefs);
@@ -78,33 +85,46 @@ int main(int argc, char *argv[]) {
         status;
     socklen_t addr_len = sizeof(struct sockaddr);
 
-    //struct timeval timeout = {TIMEOUT, 0};
+    struct timeval timeout = {TIMEOUT, 0};
     char input_buffer[BUFFER_SIZE],
          read_buffer[BUFFER_SIZE];
 
     memset(input_buffer, 0, BUFFER_SIZE);
     memset(read_buffer, 0, BUFFER_SIZE);
 
+    /* Initialize ncurses windows */
     int parent_x, parent_y;
     initscr();
+    /* Display mode: user input displayed */
     echo();
-    curs_set(1); // get our maximum window dimensions
-    getmaxyx(stdscr, parent_y, parent_x); // set up initial windows
+    /* Set the cursor style */
+    curs_set(1);
+    /* Get terminal dimensions */
+    getmaxyx(stdscr, parent_y, parent_x);
 
-    WINDOW *messages = newwin(parent_y - 4, parent_x, 0, 0);
-    WINDOW *input = newwin(4, parent_x, parent_y - 4, 0); // draw to our windows
+    WINDOW *win_messages = newwin(
+        parent_y - INPUT_BOX_HEIGHT, parent_x,
+        0, 0
+    );
+    WINDOW *win_input = newwin(
+        INPUT_BOX_HEIGHT, parent_x,
+        parent_y - INPUT_BOX_HEIGHT, 0
+    );
     
-    int input_x = 1, input_y = 1, messages_x = 1, messages_y = 1;
-    scrollok(messages, TRUE);
-    draw_borders(messages, input);
+    int win_messages_x = 1, win_messages_y = 1;
+    scrollok(win_messages, TRUE);
+    draw_borders(win_messages, win_input, &prefs);
 
-    wmove(messages, 1, 1);
-    wmove(input, 1, 1);
+    wmove(win_messages, 1, 1);
+    wmove(win_input, 1, 1);
 
-    wrefresh(messages);
-    wrefresh(input);
+    wrefresh(win_messages);
+    wrefresh(win_input);
 
     while (1) {
+        /* Get current time */
+        time(&rawtime);
+
         /* Clear the file descriptor sets */
         FD_ZERO(&write_fds);
         FD_ZERO(&read_fds);
@@ -114,39 +134,42 @@ int main(int argc, char *argv[]) {
         FD_SET(sock, &read_fds);
         FD_SET(STDIN, &read_fds);
 
-        select_fd = select(max_fd, &read_fds, &write_fds, NULL, NULL);
+        select_fd = select(max_fd, &read_fds, &write_fds, NULL, &timeout);
 
         if (select_fd == -1) {
             perror("Error during select.\n");
         } else if (select_fd) {
             if (FD_ISSET(STDIN, &read_fds)) {
-                /* read user input and send the message */
-                /* "%*[^\n]%*c" discards all the input after 80 characters */
-                //fgets(input_buffer, 100, stdin);
-                wgetstr(input, input_buffer);
-                werase(input);
-                wmove(input, input_y, input_x);
+                /* Read user input */
+                wgetnstr(win_input, input_buffer, MAX_MESSAGE_LEN);
+                
+                werase(win_input);
+                wmove(win_input, 1, 1);
 
-                wprintw(messages, "[%s] %s\n", prefs.username, input_buffer);
-                getyx(messages, messages_y, messages_x);
-                wmove(messages, messages_y, 1);
-                draw_borders(messages, input);
-
-                if (strcmp(input_buffer, ":q") == 0 || strcmp(input_buffer, ":Q") == 0) {
+                if (strcmp(input_buffer, ":q") == 0
+                    || strcmp(input_buffer, ":Q") == 0) {
+                    sendto(sock, "Bye bye :-)", 12, 0,
+                            (struct sockaddr *)remote_addr, addr_len);
                     status = close(sock);
                     if (status == -1) {
                         perror("Could not close the socket.\n");
                     } else {
-                        printf("Goodbye :-)\n");
+                        wprintw(win_messages, "Goodbye :-)\n");
+                        wrefresh(win_messages);
+                        sleep(2);
                         break;
                     }
                 }
             }
             if (FD_ISSET(sock, &read_fds)) {
-                /* read incoming data from socket */
-                bytes_received = recvfrom(sock, read_buffer, BUFFER_SIZE, 0, NULL, NULL);
+                /* Read incoming data from socket */
+                bytes_received = recvfrom(sock, read_buffer, BUFFER_SIZE,
+                                          0, NULL, NULL);
                 if (bytes_received == 0) {
-                    printf("Other user has disconnected, exiting.\n");
+                    wprintw(win_messages, "Other user had disconnected.\n");
+                    /* Let user read the message */
+                    wrefresh(win_messages);
+                    sleep(2);
                     break;
                 } else if (bytes_received == -1) {
                     perror("Error, lost connection");
@@ -154,11 +177,12 @@ int main(int argc, char *argv[]) {
                 }
                 
                 read_buffer[bytes_received] = '\0';
-                //printf("%s: %s", prefs.remote_username, read_buffer);
-                wprintw(messages, "[%s] %s\n", prefs.remote_username, read_buffer);
-                getyx(messages, messages_y, messages_x);
-                wmove(messages, messages_y, 1);
-                draw_borders(messages, input);
+                /* ctime already adds the newline char */
+                wprintw(win_messages, "[%s] at %s %s\n",
+                        prefs.remote_username, ctime(&rawtime), read_buffer);
+                getyx(win_messages, win_messages_y, win_messages_x);
+                wmove(win_messages, win_messages_y, 1);
+                draw_borders(win_messages, win_input, &prefs);
 
                 memset(read_buffer, 0, BUFFER_SIZE);
             }
@@ -166,20 +190,34 @@ int main(int argc, char *argv[]) {
                 /* send any available messages */
                 if (strlen(input_buffer) > 0) {
                     status = sendto(sock, input_buffer, strlen(input_buffer), 0,
-                        (struct sockaddr *)remote_addr, addr_len);
+                                    (struct sockaddr *)remote_addr, addr_len);
+                    
                     if (status == -1) {
-                        printf("The message could not be sent :-(\n%s", strerror(errno));
+                        wprintw(win_messages,
+                                "The message could not be sent :-(\n%s\n",
+                                strerror(errno));
+                        continue;
                     }
+
+                    /* ctime already adds the newline char */
+                    wprintw(win_messages, "[%s] at %s %s\n",
+                            prefs.username, ctime (&rawtime), input_buffer);
+                    getyx(win_messages, win_messages_y, win_messages_x);
+                    wmove(win_messages, win_messages_y, 1);
+                    draw_borders(win_messages, win_input, &prefs);
                     memset(input_buffer, 0, BUFFER_SIZE);
                 }
             }
         }
 
-        wrefresh(messages);
-        wrefresh(input);
+        wrefresh(win_messages);
+        wrefresh(win_input);
+
+        /* Sleep a little so that the process does not hammer the CPU */
         nanosleep(&sleep_time, NULL);
     }
 
+    /* Clean up */
     if (prefs.host != NULL) {
         free(prefs.host);
     }
@@ -193,28 +231,34 @@ int main(int argc, char *argv[]) {
         free(remote_addr);
     }
 
-    delwin(messages);
-    delwin(input);
+    delwin(win_messages);
+    delwin(win_input);
     endwin();
 
     return 0;
 }
 
-void draw_borders(WINDOW *messages, WINDOW *input) {
+void draw_borders(WINDOW *win_messages, WINDOW *win_input,
+                  struct settings *prefs) {
     int x, y;
 
-    wborder(messages, '|', '|', '-', '-', '+', '+', '+', '+');
-    wborder(input, '|', '|', '-', '-', '+', '+', '+', '+');
+    wborder(win_messages, '|', '|', '-', '-', '+', '+', '+', '+');
+    wborder(win_input, '|', '|', '-', '-', '+', '+', '+', '+');
 
-    getyx(messages, y, x);
-    wmove(messages, 0, 1);
-    wprintw(messages, "Messsages");
-    wmove(messages, y, x);
+    getyx(win_messages, y, x);
+    wmove(win_messages, 0, 2);
+    wprintw(
+        win_messages,
+        "Messsage Box : Now chatting with user %s at %s",
+        prefs->remote_username,
+        prefs->host
+    );
+    wmove(win_messages, y, x);
 
-    getyx(input, y, x);
-    wmove(input, 0, 1);
-    wprintw(input, "Input"); // refresh each window
-    wmove(input, y, x);
+    getyx(win_input, y, x);
+    wmove(win_input, 0, 2);
+    wprintw(win_input, "Input");
+    wmove(win_input, y, x);
 }
 
 struct sockaddr_in* init_server(int sock, struct settings *prefs) {
@@ -239,7 +283,8 @@ struct sockaddr_in* init_server(int sock, struct settings *prefs) {
         return NULL;
     }
 
-    printf("UDP server started. Awaiting client connection on port %d.\n", prefs->port);
+    printf("UDP server started. Awaiting client connection on port %d.\n",
+            prefs->port);
 
     while (1) {
         /* Initial message should be the client username */
@@ -263,11 +308,17 @@ struct sockaddr_in* init_server(int sock, struct settings *prefs) {
     prefs->remote_username = malloc((USERNAME_LEN + 1) * sizeof(char));
     strcpy(prefs->remote_username, buffer);
 
-    printf("Connection estabilished, client address %s:%d, client username: %s\n",
-            inet_ntoa(client_addr->sin_addr),
-            ntohs(client_addr->sin_port),
-            prefs->remote_username);
+    printf(
+        "Connection estabilished, client address %s:%d, client username: %s\n",
+        inet_ntoa(client_addr->sin_addr),
+        ntohs(client_addr->sin_port),
+        prefs->remote_username
+    );
 
+    prefs->host = malloc((HOST_LEN + 1) * sizeof(char));
+    strcpy(prefs->host, inet_ntoa(client_addr->sin_addr));
+
+    free(server_addr);
     return client_addr;
 }
 
@@ -318,7 +369,8 @@ struct sockaddr_in* init_client(int sock, struct settings *prefs) {
     prefs->remote_username = malloc((USERNAME_LEN + 1) * sizeof(char));
     strcpy(prefs->remote_username, buffer);
 
-    printf("Connected to user %s at %s.\n", prefs->remote_username, prefs->host);
+    printf("Connected to user %s at %s.\n", prefs->remote_username,
+            prefs->host);
     
     return server_addr;
 }
