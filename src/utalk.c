@@ -16,36 +16,15 @@
 #include <sys/select.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include "network.h"
 
 /* File descriptor */
 #define STDIN 0
 
-/* Use real lengths, \0 is accounted for in the code. */
-#define USERNAME_LEN 10
-#define HOST_LEN 15
-#define MAX_MESSAGE_LEN 70
-
 #define INPUT_BOX_HEIGHT 4
-
-#define BUFFER_SIZE 1024
-
-/* Sleep time after each chat cycle in nanoseconds */
-#define SLEEP_TIME 10000000
-
-/* select() blocking timeout in seconds */
-#define TIMEOUT 10
-
-struct settings {
-    char *username, *remote_username, *host;
-    int port;
-};
 
 void draw_borders(WINDOW *win_messages, WINDOW *win_input,
                   struct settings *prefs);
-
-struct sockaddr_in* init_server(int sock, struct settings *prefs);
-
-struct sockaddr_in* init_client(int sock, struct settings *prefs);
 
 int parse_args(int argc, char *argv[], struct settings *options);
 
@@ -53,6 +32,7 @@ int main(int argc, char *argv[]) {
     struct settings prefs = {NULL, NULL, NULL, -1};
     struct timespec sleep_time = {0, SLEEP_TIME};
     time_t rawtime;
+    struct timeval timeout = {TIMEOUT, 0};
 
     if (parse_args(argc, argv, &prefs) == -1) {
         return 1;
@@ -73,10 +53,20 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+        sizeof(timeout)) < 0) {
+        perror("Could not set socket settings");
+        return 1;
+    }
+
     /* Initialize connection */
     struct sockaddr_in *remote_addr = (prefs.host == NULL)
         ? init_server(sock, &prefs)
         : init_client(sock, &prefs);
+
+    if (remote_addr == NULL) {
+        return 1;
+    }
 
     fd_set write_fds, read_fds;
     int max_fd = sock + 1,
@@ -85,12 +75,11 @@ int main(int argc, char *argv[]) {
         status;
     socklen_t addr_len = sizeof(struct sockaddr);
 
-    struct timeval timeout = {TIMEOUT, 0};
-    char input_buffer[BUFFER_SIZE],
-         read_buffer[BUFFER_SIZE];
+    char input_buffer[BUFFER_SIZE + 1],
+         read_buffer[BUFFER_SIZE + 1];
 
-    memset(input_buffer, 0, BUFFER_SIZE);
-    memset(read_buffer, 0, BUFFER_SIZE);
+    memset(input_buffer, 0, BUFFER_SIZE + 1);
+    memset(read_buffer, 0, BUFFER_SIZE + 1);
 
     /* Initialize ncurses windows */
     int parent_x, parent_y;
@@ -124,6 +113,8 @@ int main(int argc, char *argv[]) {
     while (1) {
         /* Get current time */
         time(&rawtime);
+        timeout.tv_sec = TIMEOUT;
+        timeout.tv_usec = 0;
 
         /* Clear the file descriptor sets */
         FD_ZERO(&write_fds);
@@ -184,7 +175,7 @@ int main(int argc, char *argv[]) {
                 wmove(win_messages, win_messages_y, 1);
                 draw_borders(win_messages, win_input, &prefs);
 
-                memset(read_buffer, 0, BUFFER_SIZE);
+                memset(read_buffer, 0, BUFFER_SIZE + 1);
             }
             if (FD_ISSET(sock, &write_fds)) {
                 /* send any available messages */
@@ -205,7 +196,7 @@ int main(int argc, char *argv[]) {
                     getyx(win_messages, win_messages_y, win_messages_x);
                     wmove(win_messages, win_messages_y, 1);
                     draw_borders(win_messages, win_input, &prefs);
-                    memset(input_buffer, 0, BUFFER_SIZE);
+                    memset(input_buffer, 0, BUFFER_SIZE + 1);
                 }
             }
         }
@@ -259,120 +250,6 @@ void draw_borders(WINDOW *win_messages, WINDOW *win_input,
     wmove(win_input, 0, 2);
     wprintw(win_input, "Input");
     wmove(win_input, y, x);
-}
-
-struct sockaddr_in* init_server(int sock, struct settings *prefs) {
-    struct sockaddr_in *server_addr = malloc(sizeof(struct sockaddr_in)),
-                       *client_addr = malloc(sizeof(struct sockaddr_in));
-    char buffer[BUFFER_SIZE];
-    int bytes_received;
-    socklen_t addr_len = sizeof(struct sockaddr);
-
-    memset(buffer, 0, BUFFER_SIZE);
-
-    /* AF_INET is for IPv4 */
-    server_addr->sin_family = AF_INET;
-    /* htons makes sure port number is represented in MSB first */
-    server_addr->sin_port = htons(prefs->port);
-    server_addr->sin_addr.s_addr = INADDR_ANY;
-
-    memset(&(server_addr->sin_zero), 0, sizeof(server_addr->sin_zero));
-
-    if (bind(sock, (struct sockaddr*)server_addr, addr_len) == -1) {
-        perror("Could not bind a socket.\n");
-        return NULL;
-    }
-
-    printf("UDP server started. Awaiting client connection on port %d.\n",
-            prefs->port);
-
-    while (1) {
-        /* Initial message should be the client username */
-        bytes_received = recvfrom(sock, buffer, BUFFER_SIZE, 0,
-                (struct sockadrr*)client_addr, &addr_len);
-
-        if (bytes_received <= 0) {
-            perror("Could not receive handshake data.\n");
-            return NULL;
-        } else if (bytes_received > 10) {
-            perror("Username sent by the client is too long.\n");
-        } else {
-            sendto(sock, prefs->username, strlen(prefs->username), 0,
-                (struct sockaddr*)client_addr, addr_len);
-            break;
-        }
-    }
-
-
-    /* Save the username client has sent */
-    prefs->remote_username = malloc((USERNAME_LEN + 1) * sizeof(char));
-    strcpy(prefs->remote_username, buffer);
-
-    printf(
-        "Connection estabilished, client address %s:%d, client username: %s\n",
-        inet_ntoa(client_addr->sin_addr),
-        ntohs(client_addr->sin_port),
-        prefs->remote_username
-    );
-
-    prefs->host = malloc((HOST_LEN + 1) * sizeof(char));
-    strcpy(prefs->host, inet_ntoa(client_addr->sin_addr));
-
-    free(server_addr);
-    return client_addr;
-}
-
-struct sockaddr_in* init_client(int sock, struct settings *prefs) {
-    struct sockaddr_in *server_addr = malloc(sizeof(struct sockaddr));
-    /* resolve the address of the host */
-    struct hostent *h = (struct hostent*)gethostbyname(prefs->host);
-    char buffer[BUFFER_SIZE];
-    int bytes_received;
-    unsigned int addr_len = sizeof(struct sockaddr);
-
-    memset(buffer, 0, BUFFER_SIZE);
-
-    if (h == NULL) {
-        perror("Could not resolve host name");
-        return NULL;
-    }
-    
-    /* AF_INET is for IPv4 */
-    server_addr->sin_family = AF_INET;
-    /* htons makes sure port number is represented in MSB first */
-    server_addr->sin_port = htons(prefs->port);
-    server_addr->sin_addr = *((struct in_addr*)h->h_addr_list[0]);
-
-    memset(&(server_addr->sin_zero), 0, sizeof(server_addr->sin_zero));
-
-    /* Send the username to the server */
-    bytes_received = sendto(sock, prefs->username, strlen(prefs->username), 0,
-            (struct sockaddr*)server_addr, addr_len);
-    if (bytes_received == -1) {
-        perror("Could not send username to the server.\n");
-        return NULL;
-    }
-
-    /* Receive server username */
-    bytes_received = recvfrom(sock, buffer, BUFFER_SIZE, 0,
-                (struct sockaddr*)server_addr, &addr_len);
-    
-    if (bytes_received == -1) {
-        perror("Could not receive the server username.\n");
-        return NULL;
-    } else if (bytes_received > 10) {
-        perror("Received username is too long.\n");
-        return NULL;
-    }
-
-    buffer[bytes_received] = '\0';
-    prefs->remote_username = malloc((USERNAME_LEN + 1) * sizeof(char));
-    strcpy(prefs->remote_username, buffer);
-
-    printf("Connected to user %s at %s.\n", prefs->remote_username,
-            prefs->host);
-    
-    return server_addr;
 }
 
 int parse_args(int argc, char *argv[], struct settings *prefs){ 
